@@ -1,799 +1,1066 @@
-app.py
-
-from flask import Flask, render_template, request, jsonify
-from github2 import GitHubIssueResolver
-from main3 import initialize_vector_store, format_issue_response, generate_solution
+main3.py
 from dotenv import load_dotenv
 import os
+from typing import List, Dict, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_astradb import AstraDBVectorStore
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools.retriever import create_retriever_tool
 from langchain import hub
-from langchain_community.utilities import SerpAPIWrapper
+from langchain_core.documents import Document
+from langchain.tools import tool
+from github2 import GitHubIssueResolver
+from colorama import Fore, Style, init
+from colorama import Fore, Style, init
+from langchain_community.tools import DuckDuckGoSearchRun
 from langchain.tools import Tool
+from langchain_community.utilities import SerpAPIWrapper
+from langchain_core.tools import Tool
+
+
+init(autoreset=True)
+# Initialize colorama
+init()
 
 load_dotenv()
 
-app = Flask(__name__)
-
-# Initialize components
-resolver = GitHubIssueResolver()
-vstore = initialize_vector_store()
-threshold = 0.6
-retriever = vstore.as_retriever(
-    search_type="similarity_score_threshold",
-    search_kwargs={
-        "k": 3,
-        "score_threshold": threshold
-    }
-)
-
-# Configure agent tools
-retriever_tool = create_retriever_tool(
-    retriever,
-    name="github_issues",
-    description="Search existing GitHub issues and solutions"
-)
-
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro",
-    google_api_key=os.getenv("GEMINI_API_KEY")
-)
-
+def display_welcome():
+    """Enhanced welcome message with color"""
+    print(Fore.CYAN + "=" * 60)
+    print(Fore.YELLOW + "🤖 Github Issues Resolution Agent".center(60))
+    print(Fore.CYAN + "=" * 60 + Style.RESET_ALL)
+    print(Fore.GREEN + "\n🚀 What This Agent Does:" + Style.RESET_ALL)
+    print("-" * 59)
+    print(f"{Fore.BLUE}| 1. SEARCH   {Style.RESET_ALL}| Find existing GitHub issues similar to yours")
+    print(f"{Fore.BLUE}| 2. SOLUTIONS{Style.RESET_ALL}| View community-approved fixes and workarounds")
+    print(f"{Fore.BLUE}| 3. RESOLVE  {Style.RESET_ALL}| Comment on issues or continue as a new issues")
+    print(f"{Fore.BLUE}| 4. AI HELP  {Style.RESET_ALL}| Get automated diagnosis and prevention advice")
+    print("-" * 59)
+    
+    print(Fore.GREEN + "\n🔧 Current Configuration:" + Style.RESET_ALL)
+    print(f"• Repository: {Fore.YELLOW}techwithtim/Flask-Web-App-Tutorial{Style.RESET_ALL}")
+    print(f"• AI Model: {Fore.YELLOW}Gemini 1.5 Pro{Style.RESET_ALL}")
+    print(f"• Database: {Fore.YELLOW}AstraDB{Style.RESET_ALL}")
+    
+    # print(Fore.GREEN + "\n📝 How To Proceed:" + Style.RESET_ALL)
+    # print("1. Describe your issue in natural language")
+    # print("2. We'll search for existing solutions")
+    # print("3. Choose to comment or get new AI solution")
+    # print("\n" + "=" * 60)
+    # print(Fore.MAGENTA + "💡 Pro Tip: Include error messages for best results!" + Style.RESET_ALL)
+    # print("=" * 60 + "\n")
 def setup_web_search_tool():
-    # """Configure web search tool"""
-    # search = SerpAPIWrapper()
-    # return Tool(
-    #     name="web_search",
-    #     func=search.run,
-    #     descr
-    # iption="Search the internet for technical solutions. Input should be a clear search query."
-    # )
-    """Configure SerpAPI for reliable web searches and extract top 3 URLs."""
+    """Configure SerpAPI for reliable web searches"""
     search = SerpAPIWrapper()
-
-    def search_with_links(query):
-        # Use the .results property to get structured results
-        search_results = search.results(query)
-        formatted_results = []
-
-        # Get up to 3 results from 'organic_results'
-        for result in search_results.get('organic_results', [])[:3]:
-            title = result.get('title')
-            snippet = result.get('snippet')
-            link = result.get('link')
-
-            if snippet and link:
-                formatted_results.append(f"{title}\n{snippet}\nURL: {link}")
-
-        return "\n\n".join(formatted_results) if formatted_results else "No results found."
-
     return Tool(
         name="web_search",
-        func=search_with_links,
-        description="Search the internet for technical solutions. Returns top 3 results with title, snippet, and URL."
+        func=search.run,
+        description="Search the internet for technical solutions. Input should be a clear search query."
     )
 
-
-web_search_tool = setup_web_search_tool()
-tools = [ generate_solution, web_search_tool]
-agent = create_react_agent(llm, tools, hub.pull("hwchase17/react"))
-executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
-@app.route('/')
-def index():
-    """Render the main interface"""
-    return render_template('index.html')
-
-@app.route('/api/issues', methods=['POST'])
-def search_issues():
-    """Handle issue search requests"""
-    try:
-        data = request.get_json()
-        query = data.get('query', '').strip()
-        
-        if not query:
-            return jsonify({"error": "Please enter a search query"}), 400
-        
-        # Search existing issues
-        similar_docs = retriever.invoke(query)
-        
-        if similar_docs:
-            resolution_status = resolver.get_issue_state(similar_docs[0].metadata['number'])
-            formatted_response = format_issue_response(
-                similar_docs,
-                {
-                    "status": "resolved" if resolution_status["is_resolved"] else "open",
-                    "reference": similar_docs[0].metadata['url']
-                }
-            )
-            return jsonify({
-                "results": formatted_response,
-                "has_results": True,
-                "issues": [
-                    {
-                        "number": doc.metadata['number'],
-                        "title": doc.metadata['title'],
-                        "url": doc.metadata['url'],
-                        "state": doc.metadata['state'],
-                        "created_at": doc.metadata['created_at'],
-                        "description": doc.page_content,
-                        "solution": doc.metadata.get('solution', '')
-                    } for doc in similar_docs
-                ]
-            })
-        else:
-            return jsonify({
-                "results": "No similar issues found.",
-                "has_results": False
-            })
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/comment', methods=['POST'])
-def add_comment():
-    """Add comment to an existing issue"""
-    try:
-        data = request.get_json()
-        issue_number = data.get('issue_number')
-        comment = data.get('comment', '').strip()
-        
-        if not comment:
-            return jsonify({"error": "Comment cannot be empty"}), 400
-            
-        msg = resolver.contribute_to_issue(issue_number, comment)
-        return jsonify({"message": msg})
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/solution', methods=['POST'])
-def get_solution():
-    """Get AI-generated solution and relevant links"""
-    try:
-        data = request.get_json()
-        problem = data.get('problem', '').strip()
-        
-        if not problem:
-            return jsonify({"error": "Problem description cannot be empty"}), 400
-        
-        # Perform web search for relevant links
-        print("Performing web search...")
-        web_search_result = web_search_tool.func(problem)
-        print("Web search result:", web_search_result)
-        
-        # Generate a consolidated solution
-        print("Generating AI solution...")
-        ai_solution = executor.invoke({
-            "input": f"Search for technical solutions to: {problem}. Focus on StackOverflow and programming blogs."
-        })
-        print("AI solution result:", ai_solution)
-        
-        # Return both the web search results and the AI solution
-        return jsonify({
-            "links": web_search_result,
-            "solution": ai_solution["output"]
-        })
-        
-    except Exception as e:
-        print("Error in /api/solution:", str(e))  # Debugging
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/update-db', methods=['POST'])
-def update_database():
-    """Update the issues database"""
-    global vstore, retriever
+@tool
+def generate_solution(problem_description: str) -> str:
+    """Generates technical solutions for coding problems"""
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-pro",
+        google_api_key=os.getenv("GEMINI_API_KEY")
+    )
+    prompt = f"""Provide a detailed solution for:
+    {problem_description}
     
+    Include:
+    1. Root cause analysis
+    2. Fixes with code examples
+    3. Prevention tips"""
+    
+    return llm.invoke(prompt).content
+
+def initialize_vector_store() -> AstraDBVectorStore:
+    """Initialize vector store with error handling"""
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # print("h2")
+    # First try to connect to existing collection
+    # print("API Endpoint:", os.getenv("ASTRA_DB_API_ENDPOINT"))
+
     try:
-        issues = resolver.fetch_issues_as_documents()
-        try:
-            vstore.delete_collection()
-        except:
-            pass
+        return AstraDBVectorStore(
+
         
-        # Reinitialize the vector store
-        vstore = initialize_vector_store()
-        
-        # Enhance issues with solutions from PRs/comments
-        enhanced_issues = []
-        for issue in issues:
-            issue_number = issue.metadata['number']
-            resolution_data = resolver.get_issue_state(issue_number)
+            embedding=embeddings,
+            collection_name="issues",
+            api_endpoint=os.getenv("ASTRA_DB_API_ENDPOINT"),
+            token=os.getenv("ASTRA_DB_APPLICATION_TOKEN"),
             
-            if resolution_data['is_resolved']:
-                solution = f"Fixed in PR: {resolution_data.get('pr_url', 'N/A')}"
-                issue.metadata['solution'] = solution
-            enhanced_issues.append(issue)
-        
-        vstore.add_documents(enhanced_issues)
-        retriever = vstore.as_retriever(
-            search_type="similarity_score_threshold",
-            search_kwargs={
-                "k": 3,
-                "score_threshold": threshold
-            }
+        )
+    except Exception as e:
+        print(Fore.RED + f"⚠️ Error connecting to existing collection: {str(e)}" + Style.RESET_ALL)
+        print(Fore.YELLOW + "Creating new collection..." + Style.RESET_ALL)
+        return AstraDBVectorStore(
+            embedding=embeddings,
+            collection_name="issues",
+            api_endpoint=os.getenv("ASTRA_DB_API_ENDPOINT"),
+            token=os.getenv("ASTRA_DB_APPLICATION_TOKEN")
+        )
+
+def format_issue_response(issues: List[Document], resolution_context: Dict = None) -> str:
+    """Enhanced formatting with color and better layout"""
+    response = ""
+    
+    # if resolution_context:
+    #     status = resolution_context.get('status', 'unknown').upper()
+    #     color = Fore.GREEN if status == "RESOLVED" else Fore.YELLOW
+    #     response += f"{color}RESOLUTION STATUS: {status}{Style.RESET_ALL}\n"
+    #     if resolution_context.get("reference"):
+    #         response += f"{Fore.CYAN}Reference: {resolution_context['reference']}{Style.RESET_ALL}\n\n"
+    
+    for i, issue in enumerate(issues, 1):
+        meta = issue.metadata
+        status_color = Fore.RED if meta.get('state') == 'open' else Fore.GREEN
+        response += (
+            f"{i}. {status_color}[{'OPEN' if meta.get('state') == 'open' else 'CLOSED'}]{Style.RESET_ALL} "
+            f"{Fore.BLUE}{meta.get('title', 'Untitled')}{Style.RESET_ALL}\n"
+            f"   {Fore.WHITE}#{meta.get('number')} | Created: {meta.get('created_at')}{Style.RESET_ALL}\n"
+            f"   {Fore.CYAN}URL: {meta.get('url')}{Style.RESET_ALL}\n"
         )
         
-        return jsonify({
-            "message": f"Updated database with {len(enhanced_issues)} issues",
-            "success": True
+        if issue.page_content:
+            desc = ' '.join(line for line in issue.page_content.split('\n') 
+                          if line.strip() and not line.startswith("Description:"))
+            response += f"   {Fore.WHITE}Description: {desc[:200]}{'...' if len(desc) > 200 else ''}{Style.RESET_ALL}\n"
+        
+        if meta.get('solution'):
+            response += f"   {Fore.GREEN}🔧 Solution: {meta['solution'][:150]}...{Style.RESET_ALL}\n"
+        
+        response += "\n"
+    
+    return response
+
+def process_issue_description():
+    """Main execution flow with error handling"""
+    try:
+        display_welcome()
+        
+        # Initialize components
+        resolver = GitHubIssueResolver()
+        vstore = initialize_vector_store()
+        # print("h1")
+
+        # # Update vector store
+        # try:
+        #     issues = resolver.fetch_issues_as_documents()
+        #     enhanced_issues = []
+            
+        #     for issue in issues:
+        #         resolution_data = resolver.get_issue_state(issue.metadata['number'])
+        #         if resolution_data['is_resolved']:
+        #             issue.metadata['solution'] = f"Fixed in PR: {resolution_data.get('pr_url', 'N/A')}"
+        #         enhanced_issues.append(issue)
+            
+        #     vstore.add_documents(enhanced_issues)
+        #     print(Fore.GREEN + f"✓ Loaded {len(enhanced_issues)} issues" + Style.RESET_ALL)
+        # except Exception as e:
+        #     print(Fore.RED + f"⚠️ Error loading issues: {str(e)}" + Style.RESET_ALL)
+        if input("Update issues database? (y/N): ").lower() == "y":
+            issues = resolver.fetch_issues_as_documents()
+            try:
+                vstore.delete_collection()
+                # print("hii")
+            except:
+                pass
+            vstore = initialize_vector_store()
+            
+            # Enhance issues with solutions from PRs/comments
+            enhanced_issues = []
+            for issue in issues:
+                # print(issue)
+                
+                issue_number = issue.metadata['number']
+                resolution_data = resolver.get_issue_state(issue_number)
+                # print("-------")
+                # print(resolution_data)
+                # print("-------")
+            
+                if resolution_data['is_resolved']:
+                    # Try to extract solution from closing PR or comments
+                    solution = f"Fixed in PR: {resolution_data.get('pr_url', 'N/A')}"
+                    # print(resolution_data)
+                    # print(solution)
+                    
+                    issue.metadata['solution'] = solution
+                enhanced_issues.append(issue)
+            
+            vstore.add_documents(enhanced_issues)
+            # print(f"Loaded {len(enhanced_issues)} issues")
+            print(f"Loaded issues")
+
+        # Configure agent
+        threshold=0.6
+        retriever = vstore.as_retriever(search_type="similarity_score_threshold",search_kwargs={
+            "k": 3,  # Return top 5 matches
+            "score_threshold": threshold  # Minimum similarity score (0.0 to 1.0)
         })
-        
+        retriever_tool = create_retriever_tool(
+            retriever,
+            name="github_issues",
+            description="Search existing GitHub issues and solutions"
+        )
+
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-pro",
+            google_api_key=os.getenv("GEMINI_API_KEY")
+        )
+        web_search_tool = setup_web_search_tool()
+        tools = [retriever_tool, generate_solution,web_search_tool]
+        agent = create_react_agent(llm, tools, hub.pull("hwchase17/react"))
+        executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+        # Main interaction loop
+        while True:
+            try:
+                user_input = input("\nDescribe your GitHub issue (or 'q' to quit): ").strip()
+                if user_input.lower() == 'q':
+                    break
+                
+                # Search existing issues
+                similar_docs = retriever.invoke(user_input)
+                
+                if similar_docs:
+                    resolution_status = resolver.get_issue_state(similar_docs[0].metadata['number'])
+                    print(format_issue_response(
+                        similar_docs,
+                        {
+                            "status": "resolved" if resolution_status["is_resolved"] else "open",
+                            "reference": similar_docs[0].metadata['url']
+                        }
+                    ))
+                    
+                    action = input("\nChoose action: [1] Comment [2] New solution: ")
+                    if action == "1":
+                        comment = input("Enter your comment: ")
+                        msg=resolver.contribute_to_issue(similar_docs[0].metadata['number'], comment)
+                        print(msg)
+                        continue
+                    elif action == "2":
+                        # Perform web search
+                        print(Fore.CYAN + "\n🌐 Searching the web for solutions..." + Style.RESET_ALL)
+                        result = executor.invoke({
+                        "input": f"Search for technical solutions to: {user_input}. Focus on  StackOverflow and programming blogs."
+                        })
+                    
+                        print(Fore.GREEN + "\nSearch Results:" + Style.RESET_ALL)
+                        print("-" * 80)
+                        print(result["output"])
+                        print("-" * 80)
+                    
+                     
+                # Generate new solution
+                # print(Fore.YELLOW + "\nAnalyzing your issue..." + Style.RESET_ALL)
+                # result = executor.invoke({
+                #     "input": user_input,
+                #     "existing_issues": format_issue_response(similar_docs) if similar_docs else "None"
+                # })
+                # print(Fore.GREEN + "\nSOLUTION:" + Style.RESET_ALL)
+                # print(result["output"])
+                
+            except KeyboardInterrupt:
+                print(Fore.RED + "\nOperation cancelled by user" + Style.RESET_ALL)
+                break
+            except Exception as e:
+                print(Fore.RED + f"\n⚠️ Error: {str(e)}" + Style.RESET_ALL)
+
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
-@app.route('/results')
-def results():
-    query = request.args.get('query', '')
-    return render_template('results.html', query=query)
-if __name__ == '__main__':
-    app.run(debug=True)
+        print(Fore.RED + f"Fatal error: {str(e)}" + Style.RESET_ALL)
+    finally:
+        print(Fore.CYAN + "\nThank you for using the GitHub Issue Resolution Assistant!" + Style.RESET_ALL)
 
-
-# from flask import Flask, render_template, request, jsonify
-# from github2 import GitHubIssueResolver
-# from main3 import initialize_vector_store, format_issue_response, generate_solution
-# from dotenv import load_dotenv
-# import os
-# from langchain_google_genai import ChatGoogleGenerativeAI
-# from langchain.agents import AgentExecutor, create_react_agent
-# from langchain.tools.retriever import create_retriever_tool
-# from langchain import hub
-# from langchain_community.utilities import SerpAPIWrapper
-# from langchain.tools import Tool
-
-# load_dotenv()
-
-# app = Flask(__name__)
-
-# # Initialize components
-# resolver = GitHubIssueResolver()
-# vstore = initialize_vector_store()
-# threshold = 0.6
-# retriever = vstore.as_retriever(
-#     search_type="similarity_score_threshold",
-#     search_kwargs={
-#         "k": 3,
-#         "score_threshold": threshold
-#     }
-# )
-
-# retriever_tool = create_retriever_tool(
-#     retriever,
-#     name="github_issues",
-#     description="Search existing GitHub issues and solutions"
-# )
-
-# llm = ChatGoogleGenerativeAI(
-#     model="gemini-1.5-pro",
-#     google_api_key=os.getenv("GEMINI_API_KEY")
-# )
-
-# def setup_web_search_tool():
-#     search = SerpAPIWrapper()
-#     return Tool(
-#         name="web_search",
-#         func=search.run,
-#         description="Search the internet for technical solutions. Input should be a clear search query."
-#     )
-
-# web_search_tool = setup_web_search_tool()
-# tools = [retriever_tool, generate_solution, web_search_tool]
-# agent = create_react_agent(llm, tools, hub.pull("hwchase17/react"))
-# executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
-# @app.route('/')
-# def index():
-#     return render_template('index.html')
-
-# @app.route('/results', methods=['POST'])
-# def results_page():
-#     """Show results page with similar issues and AI solution"""
-#     try:
-#         query = request.form.get('query', '').strip()
-        
-#         if not query:
-#             return render_template('results.html', error="Please enter an issue to search.")
-        
-#         similar_docs = retriever.invoke(query)
-#         ai_solution = None
-#         formatted_response = None
-
-#         if similar_docs:
-#             resolution_status = resolver.get_issue_state(similar_docs[0].metadata['number'])
-#             formatted_response = format_issue_response(
-#                 similar_docs,
-#                 {
-#                     "status": "resolved" if resolution_status["is_resolved"] else "open",
-#                     "reference": similar_docs[0].metadata['url']
-#                 }
-#             )
-#         else:
-#             formatted_response = "No similar issues found."
-
-#         # Optional: Also get AI solution
-#         ai_result = executor.invoke({
-#             "input": f"Search for technical solutions to: {query}. Focus on StackOverflow and programming blogs."
-#         })
-#         ai_solution = ai_result["output"]
-
-#         return render_template(
-#             'results.html',
-#             query=query,
-#             issues=similar_docs,
-#             results=formatted_response,
-#             solution=ai_solution
-#         )
-    
-#     except Exception as e:
-#         return render_template('results.html', error=f"An error occurred: {str(e)}")
-
-# @app.route('/api/comment', methods=['POST'])
-# def add_comment():
-#     try:
-#         data = request.get_json()
-#         issue_number = data.get('issue_number')
-#         comment = data.get('comment', '').strip()
-        
-#         if not comment:
-#             return jsonify({"error": "Comment cannot be empty"}), 400
-            
-#         msg = resolver.contribute_to_issue(issue_number, comment)
-#         return jsonify({"message": msg})
-        
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-
-# @app.route('/api/solution', methods=['POST'])
-# def get_solution():
-#     try:
-#         data = request.get_json()
-#         problem = data.get('problem', '').strip()
-        
-#         if not problem:
-#             return jsonify({"error": "Problem description cannot be empty"}), 400
-            
-#         result = executor.invoke({
-#             "input": f"Search for technical solutions to: {problem}. Focus on StackOverflow and programming blogs."
-#         })
-        
-#         return jsonify({"solution": result["output"]})
-        
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-
-# @app.route('/api/update-db', methods=['POST'])
-# def update_database():
-#     global vstore, retriever
-    
-#     try:
-#         issues = resolver.fetch_issues_as_documents()
-#         try:
-#             vstore.delete_collection()
-#         except:
-#             pass
-        
-#         vstore = initialize_vector_store()
-        
-#         enhanced_issues = []
-#         for issue in issues:
-#             issue_number = issue.metadata['number']
-#             resolution_data = resolver.get_issue_state(issue_number)
-            
-#             if resolution_data['is_resolved']:
-#                 solution = f"Fixed in PR: {resolution_data.get('pr_url', 'N/A')}"
-#                 issue.metadata['solution'] = solution
-#             enhanced_issues.append(issue)
-        
-#         vstore.add_documents(enhanced_issues)
-#         retriever = vstore.as_retriever(
-#             search_type="similarity_score_threshold",
-#             search_kwargs={
-#                 "k": 3,
-#                 "score_threshold": threshold
-#             }
-#         )
-        
-#         return jsonify({
-#             "message": f"Updated database with {len(enhanced_issues)} issues",
-#             "success": True
-#         })
-        
-#     except Exception as e:
-#         return jsonify({
-#             "error": str(e),
-#             "success": False
-#         }), 500
-
-# if __name__ == '__main__':
-#     app.run(debug=True)
 -------------------------------------------------------
 
-index.html
-<!DOCTYPE html>
+github2.py
+
+
+# github_agent.py
+import os
+import requests
+from typing import List, Dict, Optional
+from dotenv import load_dotenv
+from langchain_core.documents import Document
+
+load_dotenv()
+
+class GitHubIssueResolver:
+    def __init__(self):
+        self.headers = {
+            "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
+            "Accept": "application/vnd.github.v3+json" #"Hey, I want my response in the format you use for version 3 of your API, and I want it as JSON."
+        }
+        self.owner = "techwithtim"  # Default, can be overridden
+        self.repo = "Flask-Web-App-Tutorial"
+
+    def _make_github_request(self, endpoint: str) -> Dict:
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/{endpoint}"
+        response = requests.get(url, headers=self.headers)
+        # print("--------")
+        # print(response.json())
+        return response.json() if response.status_code == 200 else {}
+
+    def find_similar_issues(self, issue_title: str) -> List[Dict]:
+        """Find issues with similar titles using GitHub search API"""
+        print("hello")
+        query = f"repo:{self.owner}/{self.repo} {issue_title} in:title state:all"
+        print(query)
+        search_url = f"https://api.github.com/search/issues?q={query}"
+        response = requests.get(search_url, headers=self.headers)
+        print(response.json())
+        return response.json().get("items", [])
+
+    def get_issue_state(self, issue_number: int) -> Dict:
+        """Get detailed issue state including timeline events"""
+        issue_data = self._make_github_request(f"issues/{issue_number}")
+        # print(issue_data)
+        # print("----")
+        timeline_data = self._make_github_request(f"issues/{issue_number}/timeline")
+        # print(timeline_data)
+        # print("-----------_____")
+        return {
+            "basic": issue_data,
+            "timeline": timeline_data,
+            "is_resolved": self._check_if_resolved(issue_data, timeline_data)
+        }
+
+    def _check_if_resolved(self, issue_data: Dict, timeline_data: List) -> bool:
+        """Determine if issue was properly resolved"""
+        if issue_data.get("state") != "closed":
+            return False
+        # if timeline_data.get("event") == "closed":
+        #     return True
+        
+        # Check for PRs that mention closing this issue
+        for event in timeline_data:
+            if event.get("event") == "cross-referenced":
+                source = event.get("source", {})
+                # print("-----------_____")
+                # print(source)
+                # print("-----------_____")
+                if "pull_request" in source.get("html_url", ""):
+                    if any(keyword in source.get("body", "").lower() 
+                          for keyword in ["closes", "fixes", "resolves"]):
+                        return True
+        return False
+
+    def contribute_to_issue(self, issue_number: int, comment: str) -> str:
+        """Add context to existing issue"""
+        # print(issue_number)
+        # print(f"https://api.github.com/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments")
+        response = requests.post(
+            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments",
+            headers=self.headers,
+            json={"body": comment}
+        )
+        print("Status Code:", response.status_code)
+        # print("Response Text:", response.text)
+        return "Comment added successfully" if response.status_code == 201 else "Failed to add comment"
+
+    def handle_new_issue(self, title: str, body: str) -> Dict:
+        """Full workflow for issue handling"""
+        similar_issues = self.find_similar_issues(title)
+        
+        for issue in similar_issues:
+            issue_state = self.get_issue_state(issue["number"])
+            
+            # Case 1: Issue already resolved
+            if issue_state["is_resolved"]:
+                return {
+                    "action": "duplicate",
+                    "status": "resolved",
+                    "message": f"This appears to be a duplicate of #{issue['number']} which was already resolved",
+                    "reference": issue["html_url"]
+                }
+            
+            # Case 2: Open issue exists
+            return {
+                "action": "contribute",
+                "status": "open",
+                "message": self.contribute_to_issue(
+                    issue_number=issue["number"],
+                    comment=f"Additional context from similar report:\n\n**Title**: {title}\n**Description**: {body}"
+                ),
+                "reference": issue["html_url"]
+            }
+        
+        # Case 3: New issue
+        return {
+            "action": "new",
+            "status": "unresolved",
+            "message": "No similar issues found - this appears to be a new report"
+        }
+
+    def fetch_issues_as_documents(self) -> List[Document]:
+        """Fetch all issues as LangChain Documents for vector store"""
+        issues = self._make_github_request("issues?state=all")
+        docs = []
+        # print("__________________")
+       # print(issues[0])
+        for issue in issues:
+            
+            
+            metadata = {
+                "number": issue["number"],
+                "title": issue["title"],
+
+                "url": issue["html_url"],
+                "state": issue["state"],
+                "created_at": issue["created_at"]
+            }
+            content = f"Issue #{issue['number']}: {issue['title']}\nState: {issue['state']}\n"
+            content += f"Description:\n{issue['body']}\n" if issue.get("body") else ""
+            
+            docs.append(Document(page_content=content, metadata=metadata))
+            # print("----------------n")
+        # print(docs)
+        return docs
+
+----------------------------------------------------------
+
+results.html
+
+
+
+ <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GitHub Issue Resolver</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <title>Search Results - GitHub Issue Resolver</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/results.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
     <div class="container">
-        <!-- Header Section -->
-        <header class="welcome-header">
-            <div class="welcome-banner">
-                <h1><i class="fab fa-github"></i> GitHub Issue Resolver</h1>
-                <p class="subtitle">AI-powered solutions for technical issues</p>
-            </div>
+        <header>
+            <h1><i class="fab fa-github"></i> Issue Results</h1>
+            <a href="/" class="back-btn"><i class="fas fa-arrow-left"></i> New Search</a>
         </header>
 
-        <!-- Main Content -->
         <main>
-            <!-- Features Section -->
-            <section class="features-section">
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-search"></i>
-                    </div>
-                    <h3>Search</h3>
-                    <p>Find existing GitHub issues similar to yours</p>
-                </div>
-                
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-check-circle"></i>
-                    </div>
-                    <h3>Solutions</h3>
-                    <p>View community-approved fixes and workarounds</p>
-                </div>
-                
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-comment-dots"></i>
-                    </div>
-                    <h3>Resolve</h3>
-                    <p>Comment on issues or continue as new issues</p>
-                </div>
-                
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-robot"></i>
-                    </div>
-                    <h3>AI Help</h3>
-                    <p>Get automated diagnosis and prevention advice</p>
-                </div>
-            </section>
+            <div class="query-display">
+                <h2>Search results for: <span id="search-query"></span></h2>
+            </div>
 
-            <!-- Configuration Section -->
-            <section class="config-section">
-                <h2><i class="fas fa-cog"></i> Current Configuration</h2>
-                <div class="config-grid">
-                    <div class="config-item">
-                        <span class="config-label">Repository:</span>
-                        <span class="config-value">techwithtim/Flask-Web-App-Tutorial</span>
-                    </div>
-                    <div class="config-item">
-                        <span class="config-label">AI Model:</span>
-                        <span class="config-value">Gemini 1.5 Pro</span>
-                    </div>
-                    <div class="config-item">
-                        <span class="config-label">Database:</span>
-                        <span class="config-value">AstraDB</span>
+         
+            <section class="results-section" id="github-results">
+                <h3><i class="fas fa-code-branch"></i> GitHub Issues</h3>
+                <div class="results-container" id="issues-container">
+                    <div class="loading-spinner">
+                        <i class="fas fa-spinner fa-spin"></i> Loading GitHub issues...
                     </div>
                 </div>
             </section>
 
-            <!-- Search and Database Section -->
-            <section class="search-section">
-                <div class="search-card">
-                    <h2><i class="fas fa-bug"></i> Describe Your Issue</h2>
-                    <div class="search-box">
-                        <textarea id="issue-query" placeholder="Enter details about the technical issue you're facing..."></textarea>
-                        <button id="search-btn" class="primary-btn">
-                            <i class="fas fa-search"></i> Search GitHub Issues
-                        </button>
-                    </div>
-                </div>
-
-                <div class="database-card">
-                    <h2><i class="fas fa-database"></i> Database Management</h2>
-                    <p>Update the local issue database with the latest from GitHub</p>
-                    <button id="update-db-btn" class="secondary-btn">
-                        <i class="fas fa-sync-alt"></i> Update Database Now
+          
+            <section class="ai-help-section" id="ai-help-section">
+                <div class="ai-help-card">
+                    <h3><i class="fas fa-robot"></i> Need More Help?</h3>
+                    <p>If the GitHub results didn't solve your problem, try our AI assistant:</p>
+                    <button id="ai-help-btn" class="accent-btn">
+                        <i class="fas fa-magic"></i> Get AI Assistance
                     </button>
-                    <div class="db-status">
-                        <i class="fas fa-info-circle"></i> Last updated: <span id="last-updated">Loading...</span>
-                    </div>
                 </div>
+            </section>
 
-                <div class="action-buttons">
-                    <button id="ai-help-btn" class="accent-btn" style="display:none;">
-                        <i class="fas fa-robot"></i> Get AI Help
-                    </button>
+            
+            <section class="ai-solution-section" id="ai-solution-section" style="display: none;">
+                <h3><i class="fas fa-robot"></i> AI-Generated Solution</h3>
+                <div class="ai-solution" id="ai-solution">
+                    <div class="loading-spinner">
+                        <i class="fas fa-spinner fa-spin"></i> Generating AI solution...
+                    </div>
                 </div>
             </section>
         </main>
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-</body>
-</html>
----------------------------------------------------------------------
-style.css
+    <script src="{{ url_for('static', filename='js/results.js') }}"></script>
+</body> 
+</html> 
 
-/* General Styles */
-:root {
-  --primary-color: #2c3e50;
-  --secondary-color: #3498db;
-  --accent-color: #e74c3c;
-  --light-color: #ecf0f1;
-  --dark-color: #2c3e50;
-  --success-color: #2ecc71;
-  --warning-color: #f39c12;
-  --info-color: #3498db;
-}
 
-body {
-  font-family: 'Roboto', sans-serif;
-  background-color: #f5f7fa;
-  color: #333;
-  line-height: 1.6;
-  margin: 0;
-  padding: 0;
-}
+----------------------------------------------
 
+results.css
+
+
+/* Inherit base styles from main CSS */
+@import url('style.css');
+
+/* Results Page Specific Styles */
 .container {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 20px;
+    max-width: 900px;
 }
 
-/* Header Styles */
-.welcome-header {
-  text-align: center;
-  margin-bottom: 40px;
-  background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-  color: white;
-  padding: 30px 20px;
-  border-radius: 10px;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
 }
 
-.welcome-header h1 {
-  margin: 0;
-  font-size: 2.5rem;
+.back-btn {
+    background-color: var(--light-color);
+    color: var(--dark-color);
+    padding: 10px 15px;
+    border-radius: 4px;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: background-color 0.3s;
 }
 
-.subtitle {
-  font-size: 1.2rem;
-  opacity: 0.9;
-  margin-top: 10px;
+.back-btn:hover {
+    background-color: #d5dbdb;
 }
 
-/* Features Section */
-.features-section {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 20px;
-  margin-bottom: 40px;
+.query-display {
+    background: white;
+    padding: 15px 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    margin-bottom: 20px;
 }
 
-.feature-card {
-  background: white;
-  padding: 20px;
-  border-radius: 8px;
-  text-align: center;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+.query-display h2 {
+    margin: 0;
+    font-size: 1.3rem;
 }
 
-.feature-icon {
-  font-size: 2rem;
-  color: var(--secondary-color);
-  margin-bottom: 10px;
+.query-display span {
+    font-weight: normal;
+    color: var(--secondary-color);
 }
 
-/* Configuration Section */
-.config-section {
-  margin-bottom: 40px;
-  background: white;
-  padding: 25px;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+.results-section, .ai-help-section, .ai-solution-section {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    margin-bottom: 20px;
 }
 
-.config-section h2 {
-  margin-top: 0;
-  color: var(--primary-color);
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.results-section h3, .ai-help-section h3, .ai-solution-section h3 {
+    margin-top: 0;
+    color: var(--primary-color);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #eee;
 }
 
-.config-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-  margin-top: 15px;
+.ai-help-card {
+    text-align: center;
+    padding: 20px;
 }
 
-.config-item {
-  display: flex;
-  justify-content: space-between;
-  padding: 10px;
-  background-color: var(--light-color);
-  border-radius: 4px;
-}
-
-.config-label {
-  font-weight: 500;
-  color: var(--primary-color);
-}
-
-/* Search Section */
-.search-section {
-  display: grid;
-  gap: 30px;
-}
-
-.search-card, .database-card {
-  background: white;
-  padding: 25px;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-}
-
-.search-card h2, .database-card h2 {
-  margin-top: 0;
-  color: var(--primary-color);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.search-box {
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
-}
-
-.search-box textarea,
-.search-box input[type="text"] {
-  width: 100%;
-  padding: 15px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 1rem;
-  font-family: 'Roboto', sans-serif;
-  resize: vertical;
-  box-sizing: border-box;
-}
-
-.database-card p {
-  margin-bottom: 20px;
-}
-
-.db-status {
-  margin-top: 15px;
-  font-size: 0.9rem;
-  color: #666;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-/* Button Styles */
-button {
-  cursor: pointer;
-  border: none;
-  border-radius: 4px;
-  padding: 12px 20px;
-  font-size: 1rem;
-  font-weight: 500;
-  transition: all 0.3s ease;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.primary-btn {
-  background-color: var(--secondary-color);
-  color: white;
-}
-
-.primary-btn:hover {
-  background-color: #2980b9;
-}
-
-.secondary-btn {
-  background-color: var(--light-color);
-  color: var(--dark-color);
-}
-
-.secondary-btn:hover {
-  background-color: #d5dbdb;
+.ai-help-card p {
+    margin-bottom: 20px;
 }
 
 .accent-btn {
-  background-color: var(--accent-color);
-  color: white;
+    background-color: var(--accent-color);
+    color: white;
+    padding: 12px 25px;
+    font-size: 1.1rem;
 }
 
 .accent-btn:hover {
-  background-color: #c0392b;
+    background-color: #c0392b;
+}
+
+.loading-spinner {
+    color: #666;
+    text-align: center;
+    padding: 20px;
+}
+
+/* Issue Cards */
+.issue-card {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 4px;
+    border-left: 4px solid var(--secondary-color);
+    margin-bottom: 15px;
+}
+
+.issue-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.issue-title {
+    font-weight: 500;
+    color: var(--primary-color);
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.issue-state {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.issue-state.open {
+    background-color: #f39c12;
+    color: white;
+}
+
+.issue-state.closed {
+    background-color: #2ecc71;
+    color: white;
+}
+
+.issue-meta {
+    display: flex;
+    gap: 15px;
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.issue-description {
+    margin-bottom: 10px;
+    line-height: 1.5;
+    white-space: pre-line;
+}
+
+.issue-solution {
+    background: #e8f4fd;
+    padding: 12px;
+    border-radius: 4px;
+    margin-top: 15px;
+    border-left: 3px solid var(--info-color);
+}
+
+.issue-solution h4 {
+    margin-top: 0;
+    color: var(--info-color);
+    font-size: 1rem;
+}
+
+.issue-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+.view-issue-btn, .comment-btn {
+    padding: 8px 15px;
+    font-size: 0.9rem;
+    text-decoration: none;
+}
+
+.view-issue-btn {
+    background-color: var(--secondary-color);
+    color: white;
+}
+
+.comment-btn {
+    background-color: var(--light-color);
+    color: var(--dark-color);
 }
 
 /* Responsive Design */
 @media (max-width: 768px) {
-  .container {
-    padding: 15px;
-  }
-
-  .welcome-header h1 {
-    font-size: 2rem;
-  }
-
-  .search-box textarea,
-  .search-box input[type="text"] {
-    min-height: 100px;
-  }
-
-  .features-section {
-    grid-template-columns: 1fr;
-  }
-
-  .config-grid {
-    grid-template-columns: 1fr;
-  }
-}
----------------------------------------------------------------------
-
-main.js
-
-document.addEventListener('DOMContentLoaded', function() {
-    // Load last updated time
-    loadLastUpdated();
+    header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
     
-    // Search button functionality
-    document.getElementById('search-btn').addEventListener('click', function() {
-        const query = document.getElementById('issue-query').value.trim();
-        if (query) {
-            searchIssues(query);
-        } else {
-            alert('Please describe your issue before searching');
+    .issue-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 5px;
+    }
+    
+    .issue-meta {
+        flex-direction: column;
+        gap: 5px;
+    }
+    
+    .issue-actions {
+        flex-direction: column;
+    }
+}
+------------------------------
+
+results.js
+
+
+// if (document.readyState === "loading") {
+// document.addEventListener('DOMContentLoaded', function() {
+//   // Get query parameters
+//   console.log("dom fully lpaded")
+//   const urlParams = new URLSearchParams(window.location.search);
+//   const query = urlParams.get('query');
+//   const aiRequested = urlParams.has('ai');
+  
+//   // Display the search query
+//   document.getElementById('search-query').textContent = query;
+  
+//   // Load GitHub issues
+//   loadGitHubIssues(query);
+  
+//   // Set up AI help buttonconst aiHelpBtn = document.getElementById('ai-help-btn');
+//   const aiHelpBtn = document.getElementById('ai-help-btn');
+//   console.log("AI Help button element:", aiHelpBtn);
+//   if (!aiHelpBtn) {
+//     console.error("Error: AI Help button not found in DOM!");
+//     return;
+//   }
+//   document.getElementById('ai-help-btn').addEventListener('click', function() {
+//     console.log("AI Help button clicked");
+//       getAISolution(query);
+//   });
+  
+//   // If AI was requested directly, show that section immediately
+//   if (aiRequested) {
+//       document.getElementById('ai-help-section').style.display = 'none';
+//       document.getElementById('ai-solution-section').style.display = 'block';
+//       getAISolution(query);
+//   }
+// });
+
+// function loadGitHubIssues(query) {
+//   const issuesContainer = document.getElementById('issues-container');
+  
+//   fetch('/api/issues', {
+//       method: 'POST',
+//       headers: {
+//           'Content-Type': 'application/json',
+//       },
+//       body: JSON.stringify({ query: query })
+//   })
+//   .then(response => response.json())
+//   .then(data => {
+//       if (data.has_results) {
+//           displayGitHubIssues(data.issues);
+//       } else {
+//           issuesContainer.innerHTML = `
+//               <div class="no-results">
+//                   <p>No similar GitHub issues found for this query.</p>
+//                   <p>Try our AI assistant for help with this issue.</p>
+//               </div>
+//           `;
+//       }
+//   })
+//   .catch(error => {
+//       console.error('Error:', error);
+//       issuesContainer.innerHTML = `
+//           <div class="error">
+//               <p>Error loading GitHub issues. Please try again.</p>
+//           </div>
+//       `;
+//   });
+// }
+
+// function displayGitHubIssues(issues) {
+//   const issuesContainer = document.getElementById('issues-container');
+  
+//   if (!issues || issues.length === 0) {
+//       issuesContainer.innerHTML = `
+//           <div class="no-results">
+//               <p>No matching GitHub issues found.</p>
+//           </div>
+//       `;
+//       return;
+//   }
+  
+//   issuesContainer.innerHTML = '';
+  
+//   issues.forEach(issue => {
+//       const issueCard = document.createElement('div');
+//       issueCard.className = 'issue-card';
+      
+//       issueCard.innerHTML = `
+//           <div class="issue-header">
+//               <h4 class="issue-title">${issue.title}</h4>
+//               <span class="issue-state ${issue.state === 'open' ? 'open' : 'closed'}">
+//                   ${issue.state}
+//               </span>
+//           </div>
+//           <div class="issue-meta">
+//               <span>#${issue.number}</span>
+//               <span>Created: ${new Date(issue.created_at).toLocaleDateString()}</span>
+//               <a href="${issue.url}" target="_blank">View on GitHub</a>
+//           </div>
+//           <div class="issue-description">
+//               ${issue.description}
+//           </div>
+//           ${issue.solution ? `
+//               <div class="issue-solution">
+//                   <h4>Solution</h4>
+//                   <p>${issue.solution}</p>
+//               </div>
+//           ` : ''}
+//           <div class="issue-actions">
+//               <a href="${issue.url}" target="_blank" class="view-issue-btn">
+//                   <i class="fas fa-external-link-alt"></i> View Issue
+//               </a>
+//               <button class="comment-btn" data-issue-number="${issue.number}">
+//                   <i class="fas fa-comment"></i> Add Comment
+//               </button>
+//           </div>
+//       `;
+      
+//       issuesContainer.appendChild(issueCard);
+//   });
+  
+//   // Add event listeners to comment buttons
+//   document.querySelectorAll('.comment-btn').forEach(button => {
+//       button.addEventListener('click', function() {
+//           const issueNumber = this.getAttribute('data-issue-number');
+//           addComment(issueNumber);
+//       });
+//   });
+// }
+
+// // function getAISolution(query) {
+// //   console.log("hii")
+// //   const aiHelpSection = document.getElementById('ai-help-section');
+// //   const aiSolutionSection = document.getElementById('ai-solution-section');
+// //   const aiSolution = document.getElementById('ai-solution');
+// //   aiSolution.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Generating solution...</p>';
+// //   // Hide help prompt, show solution section
+// //   aiHelpSection.style.display = 'none';
+// //   aiSolutionSection.style.display = 'block';
+// //   console.log("Query being sent to AI:", query); // Add at start of getAISolution
+// //   // Scroll to AI solution
+// //   aiSolutionSection.scrollIntoView({ behavior: 'smooth' });
+  
+// //   fetch('/api/solution', {
+// //       method: 'POST',
+// //       headers: {
+// //           'Content-Type': 'application/json',
+// //       },
+// //       body: JSON.stringify({ problem: query })
+// //   })
+// //   .then(response => response.json())
+// //   .then(data => {
+// //       if (data.solution) {
+// //           aiSolution.innerHTML = `
+// //               <div class="markdown-content">
+// //                   ${data.solution}
+// //               </div>
+// //               <div class="feedback-buttons">
+// //                   <button id="solution-helpful" class="feedback-btn helpful">
+// //                       <i class="fas fa-thumbs-up"></i> Helpful
+// //                   </button>
+// //                   <button id="solution-not-helpful" class="feedback-btn not-helpful">
+// //                       <i class="fas fa-thumbs-down"></i> Not Helpful
+// //                   </button>
+// //               </div>
+// //           `;
+          
+// //           // Add feedback event listeners
+// //           document.getElementById('solution-helpful').addEventListener('click', () => {
+// //               alert('Thanks for your feedback!');
+// //           });
+          
+// //           document.getElementById('solution-not-helpful').addEventListener('click', () => {
+// //               const feedback = prompt('What could be improved about this solution?');
+// //               if (feedback) {
+// //                   alert('Thanks for your feedback! We\'ll use it to improve our answers.');
+// //               }
+// //           });
+// //       } else {
+// //           aiSolution.innerHTML = `
+// //               <div class="error">
+// //                   <p>Error generating AI solution. Please try again later.</p>
+// //                   ${data.error ? `<p>${data.error}</p>` : ''}
+// //               </div>
+// //           `;
+// //       }
+// //   })
+// //   .catch(error => {
+// //       console.error('Error:', error);
+// //       aiSolution.innerHTML = `
+// //           <div class="error">
+// //               <p>Error generating AI solution. Please try again later.</p>
+// //           </div>
+// //       `;
+// //   });
+// // }
+
+// function getAISolution(query) {
+//     console.log("Fetching AI solution...");
+//     const aiHelpSection = document.getElementById('ai-help-section');
+//     const aiSolutionSection = document.getElementById('ai-solution-section');
+//     const aiSolution = document.getElementById('ai-solution');
+
+//     // Show loading spinner and hide the help section
+//     aiSolution.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Generating solution...</p>';
+//     aiHelpSection.style.display = 'none';
+//     aiSolutionSection.style.display = 'block';
+
+//     // Scroll to the AI solution section
+//     aiSolutionSection.scrollIntoView({ behavior: 'smooth' });
+
+//     // Fetch AI solution and web search links
+//     fetch('/api/solution', {
+//         method: 'POST',
+//         headers: {
+//             'Content-Type': 'application/json',
+//         },
+//         body: JSON.stringify({ problem: query })
+//     })
+//     .then(response => response.json())
+//     .then(data => {
+//         if (data.links || data.solution) {
+//             // Display links to websites
+//             const linksHTML = data.links
+//                 ? `<h4><i class="fas fa-search"></i> Relevant Links</h4>
+//                    <ul>
+//                        ${data.links.split('\n').map(link => {
+//                            if (link.includes('URL: ')) {
+//                                const [title, url] = link.split('URL: ');
+//                                return `<li><a href="${url.trim()}" target="_blank">${title.trim()}</a></li>`;
+//                            }
+//                            return ''; // Skip invalid lines
+//                        }).join('')}
+//                    </ul>`
+//                 : '<p>No web search results found.</p>';
+
+//             // Display AI-generated summary
+//             const summaryHTML = data.solution
+//                 ? `<h4><i class="fas fa-lightbulb"></i> Summary</h4>
+//                    <p>${data.solution}</p>`
+//                 : '<p>No AI solution generated.</p>';
+
+//             // Combine links and summary into the AI solution section
+//             aiSolution.innerHTML = `
+//                 <div class="ai-links">
+//                     ${linksHTML}
+//                 </div>
+//                 <div class="ai-summary" style="margin-top: 20px;">
+//                     ${summaryHTML}
+//                 </div>
+//                 <div class="feedback-buttons" style="margin-top: 20px;">
+//                     <button id="solution-helpful" class="feedback-btn helpful">
+//                         <i class="fas fa-thumbs-up"></i> Helpful
+//                     </button>
+//                     <button id="solution-not-helpful" class="feedback-btn not-helpful">
+//                         <i class="fas fa-thumbs-down"></i> Not Helpful
+//                     </button>
+//                 </div>
+//             `;
+
+//             // Add feedback event listeners
+//             document.getElementById('solution-helpful').addEventListener('click', () => {
+//                 alert('Thanks for your feedback!');
+//             });
+
+//             document.getElementById('solution-not-helpful').addEventListener('click', () => {
+//                 const feedback = prompt('What could be improved about this solution?');
+//                 if (feedback) {
+//                     alert('Thanks for your feedback! We\'ll use it to improve our answers.');
+//                 }
+//             });
+//         } else {
+//             aiSolution.innerHTML = `
+//                 <div class="error">
+//                     <p>No results found. Please try again later.</p>
+//                 </div>
+//             `;
+//         }
+//     })
+//     .catch(error => {
+//         console.error('Error fetching AI solution:', error);
+//         aiSolution.innerHTML = `
+//             <div class="error">
+//                 <p>Error generating AI solution. Please try again later.</p>
+//             </div>
+//         `;
+//     });
+// }
+// function addComment(issueNumber) {
+//   const comment = prompt('Enter your comment to add to this issue:');
+//   if (comment && comment.trim()) {
+//       fetch('/api/comment', {
+//           method: 'POST',
+//           headers: {
+//               'Content-Type': 'application/json',
+//           },
+//           body: JSON.stringify({
+//               issue_number: issueNumber,
+//               comment: comment
+//           })
+//       })
+//       .then(response => response.json())
+//       .then(data => {
+//           alert(data.message || 'Comment added successfully!');
+//       })
+//       .catch(error => {
+//           console.error('Error:', error);
+//           alert('Error adding comment');
+//       });
+//   }
+// }
+// }
+
+// else {
+//     alert("DOM already loaded");
+// }
+
+
+if (document.readyState === "loading") {
+    document.addEventListener('DOMContentLoaded', function () {
+        console.log("DOM fully loaded");
+
+        // Get query parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const query = urlParams.get('query');
+        const aiRequested = urlParams.has('ai');
+
+        // Display the search query
+        document.getElementById('search-query').textContent = query;
+
+        // Load GitHub issues
+        loadGitHubIssues(query);
+
+        // Set up AI help button
+        const aiHelpBtn = document.getElementById('ai-help-btn');
+        if (!aiHelpBtn) {
+            console.error("Error: AI Help button not found in DOM!");
+            return;
+        }
+
+        aiHelpBtn.addEventListener('click', function () {
+            console.log("AI Help button clicked");
+            getAISolution(query);
+        });
+
+        // If AI was requested directly, show that section immediately
+        if (aiRequested) {
+            document.getElementById('ai-help-section').style.display = 'none';
+            document.getElementById('ai-solution-section').style.display = 'block';
+            getAISolution(query);
         }
     });
-
-    // Update database button
-    document.getElementById('update-db-btn').addEventListener('click', function() {
-        updateDatabase();
-    });
-
-    // Allow search on Ctrl+Enter in textarea
-    document.getElementById('issue-query').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && e.ctrlKey) {
-            document.getElementById('search-btn').click();
-        }
-    });
-});
-
-function loadLastUpdated() {
-    // In a real app, you would fetch this from your backend
-    const now = new Date();
-    document.getElementById('last-updated').textContent = now.toLocaleString();
+} else {
+    alert("DOM already loaded");
 }
 
-function searchIssues(query) {
-    // Show loading state
-    const btn = document.getElementById('search-btn');
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Searching...';
-    btn.disabled = true;
-    
+// Function to load GitHub issues
+function loadGitHubIssues(query) {
+    const issuesContainer = document.getElementById('issues-container');
+
     fetch('/api/issues', {
         method: 'POST',
         headers: {
@@ -801,51 +1068,187 @@ function searchIssues(query) {
         },
         body: JSON.stringify({ query: query })
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.has_results) {
-            // Redirect to results page with query parameter
-            window.location.href = `/results?query=${encodeURIComponent(query)}`;
-        } else {
-            // Offer to get AI help directly since no results found
-            if (confirm('No similar issues found. Would you like AI help instead?')) {
-                window.location.href = `/results?query=${encodeURIComponent(query)}&ai=1`;
+        .then(response => response.json())
+        .then(data => {
+            if (data.has_results) {
+                displayGitHubIssues(data.issues);
+            } else {
+                issuesContainer.innerHTML = `
+                    <div class="no-results">
+                        <p>No similar GitHub issues found for this query.</p>
+                        <p>Try our AI assistant for help with this issue.</p>
+                    </div>
+                `;
             }
-        }
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        alert('An error occurred while searching for issues');
-    })
-    .finally(() => {
-        btn.innerHTML = '<i class="fas fa-search"></i> Search GitHub Issues';
-        btn.disabled = false;
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            issuesContainer.innerHTML = `
+                <div class="error">
+                    <p>Error loading GitHub issues. Please try again.</p>
+                </div>
+            `;
+        });
+}
+
+// Function to display GitHub issues
+function displayGitHubIssues(issues) {
+    const issuesContainer = document.getElementById('issues-container');
+
+    if (!issues || issues.length === 0) {
+        issuesContainer.innerHTML = `
+            <div class="no-results">
+                <p>No matching GitHub issues found.</p>
+            </div>
+        `;
+        return;
+    }
+
+    issuesContainer.innerHTML = '';
+
+    issues.forEach(issue => {
+        const issueCard = document.createElement('div');
+        issueCard.className = 'issue-card';
+
+        issueCard.innerHTML = `
+            <div class="issue-header">
+                <h4 class="issue-title">${issue.title}</h4>
+                <span class="issue-state ${issue.state === 'open' ? 'open' : 'closed'}">
+                    ${issue.state}
+                </span>
+            </div>
+            <div class="issue-meta">
+                <span>#${issue.number}</span>
+                <span>Created: ${new Date(issue.created_at).toLocaleDateString()}</span>
+                <a href="${issue.url}" target="_blank">View on GitHub</a>
+            </div>
+            <div class="issue-description">
+                ${issue.description}
+            </div>
+            ${issue.solution ? `
+                <div class="issue-solution">
+                    <h4>Solution</h4>
+                    <p>${issue.solution}</p>
+                </div>
+            ` : ''}
+            <div class="issue-actions">
+                <a href="${issue.url}" target="_blank" class="view-issue-btn">
+                    <i class="fas fa-external-link-alt"></i> View Issue
+                </a>
+                <button class="comment-btn" data-issue-number="${issue.number}">
+                    <i class="fas fa-comment"></i> Add Comment
+                </button>
+            </div>
+        `;
+
+        issuesContainer.appendChild(issueCard);
+    });
+
+    // Add event listeners to comment buttons
+    document.querySelectorAll('.comment-btn').forEach(button => {
+        button.addEventListener('click', function () {
+            const issueNumber = this.getAttribute('data-issue-number');
+            addComment(issueNumber);
+        });
     });
 }
 
-function updateDatabase() {
-    const btn = document.getElementById('update-db-btn');
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Updating...';
-    btn.disabled = true;
-    
-    fetch('/api/update-db', {
-        method: 'POST'
+// Function to fetch and display AI solution
+function getAISolution(query) {
+    console.log("Fetching AI solution...");
+    const aiHelpSection = document.getElementById('ai-help-section');
+    const aiSolutionSection = document.getElementById('ai-solution-section');
+    const aiSolution = document.getElementById('ai-solution');
+
+    // Show loading spinner and hide the help section
+    aiSolution.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Generating solution...</p>';
+    aiHelpSection.style.display = 'none';
+    aiSolutionSection.style.display = 'block';
+
+    // Scroll to the AI solution section
+    aiSolutionSection.scrollIntoView({ behavior: 'smooth' });
+
+    // Fetch AI solution and web search links
+    fetch('/api/solution', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ problem: query })
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            loadLastUpdated();
-            alert('Database updated successfully!');
-        } else {
-            alert('Error updating database: ' + data.error);
-        }
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        alert('An error occurred while updating the database');
-    })
-    .finally(() => {
-        btn.innerHTML = '<i class="fas fa-sync-alt"></i> Update Database Now';
-        btn.disabled = false;
-    });
+        .then(response => response.json())
+        .then(data => {
+            console.log("Links data received:", data.links); // Debugging
+
+            if (data.links || data.solution) {
+                // Filter and display links to websites with numbering
+                const linksHTML = data.links
+                    ? `<h4><i class="fas fa-search"></i> Relevant Links</h4>
+                       <ol>
+                           ${data.links.split('\n')
+                               .filter(link => link.includes('URL: ')) // Filter valid lines
+                               .map((link, index) => {
+                                   const [message, url] = link.split('URL: ');
+                                   return `<li>${index + 1}. ${message.trim()} <a href="${url.trim()}" target="_blank">${url.trim()}</a></li>`;
+                               }).join('')}
+                       </ol>`
+                    : '<p>No web search results found.</p>';
+
+                // Display AI-generated summary
+                const summaryHTML = data.solution
+                    ? `<h4><i class="fas fa-lightbulb"></i> Summary</h4>
+                       <p>${data.solution}</p>`
+                    : '<p>No AI solution generated.</p>';
+
+                // Combine links and summary into the AI solution section
+                aiSolution.innerHTML = `
+                    <div class="ai-links">
+                        ${linksHTML}
+                    </div>
+                    <div class="ai-summary" style="margin-top: 20px;">
+                        ${summaryHTML}
+                    </div>
+                `;
+            } else {
+                aiSolution.innerHTML = `
+                    <div class="error">
+                        <p>No results found. Please try again later.</p>
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching AI solution:', error);
+            aiSolution.innerHTML = `
+                <div class="error">
+                    <p>Error generating AI solution. Please try again later.</p>
+                </div>
+            `;
+        });
 }
+// Function to add a comment to a GitHub issue
+function addComment(issueNumber) {
+    const comment = prompt('Enter your comment to add to this issue:');
+    if (comment && comment.trim()) {
+        fetch('/api/comment', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                issue_number: issueNumber,
+                comment: comment
+            })
+        })
+            .then(response => response.json())
+            .then(data => {
+                alert(data.message || 'Comment added successfully!');
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error adding comment');
+            });
+    }
+}
+
+
