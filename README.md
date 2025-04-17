@@ -1,1 +1,3 @@
 https://8e221759-9b14-49fd-b0f0-21eaf4e96917-us-east-2.apps.astra.datastax
+429428d4e6024e4e44c84b5ced7b3eee3de454386007ea967f3901516a3f091f"
+jabiAIOuJdZzjFWZCYhgKver:793355482d15cd621dfd21bfe2be0748649ebd3ab08c1bccc6d99d46608ff17d"
